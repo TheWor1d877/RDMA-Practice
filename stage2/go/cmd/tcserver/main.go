@@ -3,8 +3,8 @@
 //   WRITE：单边操作，本端 CQ 不产生 CQE（stage1 结论），校验等 client 的 done 行后做；
 //   SEND：双边操作，本端要挂 recv WR，每条 SEND 到达产生一个 opcode=RECV 的 CQE，
 //         边收边按 seed 顺序校验。
-// recv WR 在 Connect 之前就挂好：手工 verbs 建链没有握手包，client 的 connect 一完成
-// 就可能立刻发 SEND，晚了挂会吃 RNR。write 模式下这条 WR 永远不会被消耗，无害。
+// recv WR 在 Connect 后立刻挂：QP 进 INIT 态才能 post_recv，而 client 的
+// connect 一完成就可能发 SEND，期间由发送端 rnr_retry 兜底极端情况。
 package main
 
 import (
@@ -110,12 +110,15 @@ func main() {
 		doneCh <- doneResult{msg: m}
 	}()
 
-	// 第一条 recv WR 在 Connect 前挂好，覆盖 client 建链后立刻发来的 SEND
-	if err := ctx.PostRecv(recvHandle, 0, *msgSize); err != nil {
+	// recv WR 要 QP 至少处于 INIT 态才能挂，RESET 态 post_recv 直接 EINVAL——
+	// 所以放在 Connect（内含 INIT->RTR->RTS）之后。
+	// 时序上不亏：client 发第一条 SEND 前要先填 64KB payload（约百微秒），
+	// 本端建完链立刻挂 recv WR 赶得早；万一真撞上 RNR，发送端 rnr_retry=3 兜底。
+	if err := ctx.Connect(tcgo.Endpoint{QPN: peer.QPN, PSN: peer.PSN, GID: pg}); err != nil {
 		fmt.Fprintln(os.Stderr, "[server]", err)
 		os.Exit(1)
 	}
-	if err := ctx.Connect(tcgo.Endpoint{QPN: peer.QPN, PSN: peer.PSN, GID: pg}); err != nil {
+	if err := ctx.PostRecv(recvHandle, 0, *msgSize); err != nil {
 		fmt.Fprintln(os.Stderr, "[server]", err)
 		os.Exit(1)
 	}
