@@ -93,7 +93,53 @@ int main(int argc, char **argv) {
     printf("[send] 收到 CQE：RDMA_WRITE 完成 status=%s bytes=%d\n",
             ibv_wc_status_str(wc.status), wc.byte_len);
 
+    /* ---- 第二段：SEND（双边操作，和 WRITE 对照）----
+     * WRITE 只要对端提前把 (addr, rkey) 给你就能写；SEND 只要对端 QP 发，
+     * 但对端必须先挂好 recv WR，数据落在对端 recv WR 指定的 buffer 里，
+     * 具体落哪由对端决定，发送端管不着。
+     * 消息放同一 PD 上新注册的小 MR 里：SEND 不需要 REMOTE_* 权限，
+     * 本端 lkey 够用（网卡 DMA 读数据时要它）。 */
+    uint8_t *sbuf = malloc(SEND_MSG_LEN);
+    if (!sbuf) { fprintf(stderr, "malloc 失败\n"); return 1; }
+    struct ibv_mr *smr = ibv_reg_mr(c.pd, sbuf, SEND_MSG_LEN, IBV_ACCESS_LOCAL_WRITE);
+    if (!smr) { fprintf(stderr, "ibv_reg_mr（SEND buffer）失败\n"); return 1; }
+    for (int i = 0; i < SEND_MSG_LEN - 8; i++) sbuf[i] = PATTERN(0x22, i);
+    uint64_t smagic = SEND_MAGIC;
+    memcpy(sbuf + SEND_MSG_LEN - 8, &smagic, 8);
+
+    struct ibv_sge ssge = {
+        .addr   = (uint64_t)(uintptr_t)sbuf,
+        .length = SEND_MSG_LEN,
+        .lkey   = smr->lkey,
+    };
+    struct ibv_send_wr swr = {
+        .wr_id      = 2,
+        .sg_list    = &ssge,
+        .num_sge    = 1,
+        .opcode     = IBV_WR_SEND,          /* 和 IBV_WR_RDMA_WRITE 对照看这里 */
+        .send_flags = IBV_SEND_SIGNALED,
+    };  /* 注意：SEND 的 wr 不填 wr.rdma，没有 remote_addr/rkey */
+    struct ibv_send_wr *bad_swr = NULL;
+    if (ibv_post_send(c.qp, &swr, &bad_swr) != 0) {
+        fprintf(stderr, "ibv_post_send（SEND）失败\n");
+        return 1;
+    }
+    printf("[send] SEND WR 已 post：%d 字节 -> 对端 recv 队列\n", SEND_MSG_LEN);
+
+    struct ibv_wc swc;
+    do { ne = ibv_poll_cq(c.cq, 1, &swc); } while (ne == 0);
+    if (ne < 0) { fprintf(stderr, "ibv_poll_cq 出错\n"); return 1; }
+    if (swc.status != IBV_WC_SUCCESS || swc.opcode != IBV_WC_SEND) {
+        fprintf(stderr, "SEND 完成异常: status=%s opcode=%d\n",
+                ibv_wc_status_str(swc.status), swc.opcode);
+        return 1;
+    }
+    printf("[send] 收到 CQE：SEND 完成 status=%s（对端 recv WR 已消耗）\n",
+           ibv_wc_status_str(swc.status));
+
     close(cfd);
+    ibv_dereg_mr(smr);
+    free(sbuf);
     ctx_destroy(&c);
     return 0;
 }

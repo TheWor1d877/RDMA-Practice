@@ -41,6 +41,11 @@ typedef struct {
 #define DATA_MAGIC      0x52444D414F4B3135ULL  /* "RDMAOK15" 的小端字节序 */
 #define PATTERN(seed, i) ((uint8_t)((seed) + (i) * 7))
 
+/* SEND 段的消息格式：64 字节，末尾 8 字节魔数，其余按位置生成。
+ * SEND 是双边操作，两端程序各自按这个格式填/验，不需要带外协商。 */
+#define SEND_MSG_LEN    64
+#define SEND_MAGIC      0x53454E444F4B3135ULL  /* "SENDOK15" 的小端字节序 */
+
 /* 资源生命周期 */
 int  ctx_init(rdma_ctx_t *c, const char *dev_name, size_t buf_len, int gid_index);
 void ctx_destroy(rdma_ctx_t *c);
